@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 import asyncio
 import aiohttp
+import json
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -12,6 +13,9 @@ from homeassistant.core import HomeAssistant, callback
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.template import Template
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import area_registry as ar
 
 from .const import DOMAIN, MIN_TIME_BETWEEN_UPDATES
 #from .trmnl_sensor_push import label_entities
@@ -21,16 +25,19 @@ _LOGGER = logging.getLogger(__name__)
 # Since this integration only supports config entries, use this schema
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-def create_entity_payload(state) -> dict:
+
+def create_entity_payload(state, area) -> dict:
     """Create the payload for a single entity."""
+
     payload = {
         "name": state.attributes.get('friendly_name', state.entity_id),
         "value": state.state,
-        "device_class": state.attributes.get('device_class', None),
-        "unit_of_measurement": state.attributes.get('unit_of_measurement', None),
-        "icon": state.attributes.get('icon', None),
-        "friendly_name": state.attributes.get('friendly_name', state.entity_id),
-        "attributes": state.attributes
+        #"device_class": state.attributes.get('device_class', None),
+        "unit": state.attributes.get('unit_of_measurement', None),
+        "area": area
+        #"icon": state.attributes.get('icon', None),
+        #"friendly_name": state.attributes.get('friendly_name', state.entity_id),
+        #"attributes": state.attributes
     }
     _LOGGER.debug("TRMNL: Created payload for %s: %s", state.entity_id, payload)
     return payload
@@ -38,6 +45,7 @@ def create_entity_payload(state) -> dict:
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the TRMNL Entity Push component."""
     _LOGGER.debug("TRMNL: Setting up TRMNL Entity Push component")
+
     return True
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -45,7 +53,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug("TRMNL: Setting up config entry")
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {}
-
+ 
     url = entry.data["url"]
     _LOGGER.debug("TRMNL: Using webhook URL: %s", url)
 
@@ -72,13 +80,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Log the number of TRMNL entities found
         _LOGGER.info("TRMNL: Found %d entities with TRMNL label", len(trmnl_entities))
 
+        entity_registry = er.async_get(hass)
+        device_registry = dr.async_get(hass)
+        area_registry = ar.async_get(hass)
+ 
+
         # Create payload for each entity
         entities_payload = []
         for entity_id in trmnl_entities:
             state = hass.states.get(entity_id)
+            
             if state:
                 _LOGGER.debug("TRMNL: Processing entity: %s", entity_id)
-                entities_payload.append(create_entity_payload(state))
+
+                area_name = 'Unknown'
+
+                entity_entry = entity_registry.async_get(state.entity_id)
+
+                if entity_entry and hasattr(entity_entry, 'area_id') and entity_entry.area_id:
+                    area = area_registry.areas.get(entity_entry.area_id)
+                    if area:
+                        area_name = area.name
+                elif entity_entry and entity_entry.device_id:
+                    device = device_registry.async_get(entity_entry.device_id)
+                    if device and device.area_id: 
+                        area = area_registry.areas.get(device.area_id)
+                        if area:
+                            area_name = area.name 
+                        
+                entities_payload.append(create_entity_payload(state, area_name))
 
         # Send to TRMNL webhook if we have entities
         if entities_payload:
@@ -89,6 +119,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             }
             _LOGGER.debug("TRMNL: Preparing to send payload: %s", payload)
             
+            # Serialize dict to JSON string
+            json_str = json.dumps(payload)
+            # Encode JSON string to bytes
+            json_bytes = json_str.encode('utf-8')
+            # Get size in bytes
+            payload_size = len(json_bytes)
+            _LOGGER.debug("TRMNL: Minified payload to size: %s", payload_size)
+
             try:
                 async with aiohttp.ClientSession() as session:
                     _LOGGER.debug("TRMNL: Sending POST request to %s", url)
